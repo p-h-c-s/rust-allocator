@@ -1,8 +1,8 @@
 #![feature(const_mut_refs)] // allows static mut refs
-use cbindings::sbrk::{Locked, SbrkAllocator};
+use allocator::sbrk::{Locked, SbrkAllocator};
 use libc::sbrk;
 
-pub mod cbindings;
+pub mod allocator;
 
 #[cfg(feature = "use_sbrk_allocator")]
 #[global_allocator]
