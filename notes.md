@@ -40,3 +40,6 @@ Memory has to be contigous, so we don't free memory to the OS, we soft-free it i
 
 
 The alloc method takes a Layout instance as an argument, which describes the desired size and alignment that the allocated memory should have. It returns a raw pointer to the first byte of the allocated memory block. Instead of an explicit error value, the alloc method returns a null pointer to signal an allocation error. This is a bit non-idiomatic, but it has the advantage that wrapping existing system allocators is easy since they use the same convention.
+
+
+Best practice is to design your features to be additive (enabling a feature should not remove code, ie. try not to use cfg(not(...))), which means in rust analyzer you can then enable all features. However this is not always possible eg. for mutually exclusive impls.

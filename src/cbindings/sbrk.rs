@@ -1,12 +1,11 @@
 use super::spin_lock::{Spinlock, SpinlockGuard};
+use super::utils;
 use libc::sbrk;
 use std::cmp;
 use std::{
     alloc::{GlobalAlloc, Layout},
     mem::{self, align_of, size_of},
 };
-use super::utils;
-
 
 pub struct SbrkAllocator {
     free_list: FreeBlockList,
@@ -57,7 +56,7 @@ impl SbrkAllocator {
     /// Aligns the input layout in order to make sure we can allocate
     /// a FreeBlock on the new memory region
     fn align_layout(&self, layout: Layout) -> (usize, usize) {
-        let max_align = cmp::max( align_of::<FreeBlock>(), layout.align());
+        let max_align = cmp::max(align_of::<FreeBlock>(), layout.align());
         let out_size = utils::to_align(layout.size() + size_of::<FreeBlock>(), max_align);
         (out_size, max_align)
     }
@@ -78,20 +77,12 @@ impl SbrkAllocator {
                 }
                 addr as *mut u8
             }
-            None => {
-                Self::request_sys_mem(size as i32)
-            }
+            None => Self::request_sys_mem(size as i32),
         }
     }
     pub unsafe fn free(&mut self, ptr: *mut u8, size: usize) {
         self.free_list.add_free_block(ptr, size);
     }
-}
-
-pub struct FreeBlock {
-    size: usize,
-    // to avoid unstable features we might need to use pointers
-    next: Option<&'static mut FreeBlock>,
 }
 
 pub struct FreeBlockList {
@@ -112,7 +103,7 @@ impl FreeBlockList {
         node.next = self.head.next.take();
         let node_ptr = ptr as *mut FreeBlock;
         node_ptr.write(node); // write the object data to the pointer, so we avoid lifetime issues as the stack's node will be dropped here
-        self.head.next = Some(&mut *node_ptr); // puts new value back to tail next option
+        self.head.next = Some(&mut *node_ptr); // puts new value in the head of the list
     }
 
     fn find_free_block(
@@ -123,7 +114,7 @@ impl FreeBlockList {
         let mut current = &mut self.head;
 
         while let Some(ref mut blk) = current.next {
-            if let Ok(start_addr) = Self::alloc_from_block(blk, size, align) {
+            if let Ok(start_addr) = Self::check_block(blk, size, align) {
                 let next = blk.next.take();
                 let ret = Some((current.next.take().unwrap(), start_addr));
                 current.next = next;
@@ -134,7 +125,8 @@ impl FreeBlockList {
         None // if we reach the end of list, no more free memory
     }
 
-    fn alloc_from_block(block: &FreeBlock, size: usize, align: usize) -> Result<usize, ()> {
+    /// Checks if block is suitable for allocation of size `size`
+    fn check_block(block: &FreeBlock, size: usize, align: usize) -> Result<usize, ()> {
         let alloc_start = utils::to_align(block.start_addr(), align);
         let alloc_end = alloc_start.checked_add(size).ok_or(())?;
 
@@ -154,12 +146,16 @@ impl FreeBlockList {
 
         Ok(alloc_start)
     }
+}
 
+pub struct FreeBlock {
+    size: usize,
+    next: Option<&'static mut FreeBlock>,
 }
 
 impl FreeBlock {
     const fn new(size: usize) -> Self {
-        FreeBlock { size, next: None }
+        FreeBlock { size, next: None } // needs #![feature(const_mut_refs)] -> unstable
     }
 
     fn start_addr(&self) -> usize {
@@ -179,46 +175,82 @@ pub struct Thunk {
 }
 // 4 bytes
 #[derive(Debug)]
-pub struct smallerThunk {
+pub struct SmallThunk {
     field1: u32,
 }
 
+/// We can't run tests in the internal SbrkAllocator if we set the global allocator to it, as we'd have two
+/// independent allocators managing the heap via SBRK, which breaks the allocator. So the `use_sbrk_allocator` feature selects the tests that can run
+/// when the global allocator isn't set.
 #[cfg(test)]
 mod tests {
     // use std::{mem::align_of, mem::size_of, ptr::NonNull};
-    use libc::sbrk;
-    use super::{Thunk, SbrkAllocator};
+    #[cfg(not(feature = "use_sbrk_allocator"))]
+    use super::{SbrkAllocator, SmallThunk, Thunk};
+    
+    
+    #[cfg(feature = "use_sbrk_allocator")]
+    use std::alloc::{alloc, Layout};
+
     // use super::{SbrkAllocator, FreeBlock, FreeBlockList, Test};
     // use crate::cbindings::sbrk::Thunk;
 
+    #[cfg(feature = "use_sbrk_allocator")]
     #[test]
-    fn test_malloc() {
-        let mut alloc = SbrkAllocator::new();
+    fn test_alloc_base() {
+        // this doesn't work if SbrkAllocator itself is the global allocator. We might mess with it's data
+        // let mut alloc = SbrkAllocator::new();
 
-        let ref_t = unsafe {
-            let test_t = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
-            &*test_t
-        };
+        let size = size_of::<Thunk>();
+        let align = align_of::<Thunk>();
 
-        assert_eq!(size_of_val(ref_t), size_of::<Thunk>());
-        assert_eq!(align_of_val(ref_t), align_of::<Thunk>());
+        if let Ok(layout) = Layout::from_size_align(size, align) {
+            let ref_t = unsafe {
+                let test_t = alloc(layout) as *mut Thunk;
+                &*test_t
+            };
+            assert_eq!(size_of_val(ref_t), size_of::<Thunk>());
+            assert_eq!(align_of_val(ref_t), align_of::<Thunk>());
+            return;
+        }
+        panic!("Couldn't get layout");
     }
 
-    // Test to show memory reuse. After freeing the first pointer, we ask for another object. 
-    // The free-list then returns a free block for us
+    #[cfg(not(feature = "use_sbrk_allocator"))]
+    #[test]
+    fn test_malloc_excess() {
+        let mut alloc = SbrkAllocator::new();
+        unsafe {
+            let large_value_addr = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>());
+            alloc.free(large_value_addr, size_of::<Thunk>());
+
+            // Allocates object that is smaller than Thunk. So the FreeBlock will have excess space that must remain free
+            let _small_value_addr = alloc.malloc(size_of::<SmallThunk>(), align_of::<SmallThunk>());
+
+            assert!(alloc.free_list.head.next.is_some_and(|b| {
+                // The first FreeBlock should start in the excess space of the second allocation
+                let excess_offset = large_value_addr as u8 + size_of::<SmallThunk>() as u8;
+                b.start_addr() as u8 == excess_offset
+            }));
+        };
+    }
+
+    // Test to show memory reuse. After freeing the first pointer, we ask for another object.
+    // The free-list then returns a free-block corresponding to the first (now freed) allocation
+    #[cfg(not(feature = "use_sbrk_allocator"))]
     #[test]
     fn test_free_reuse() {
         unsafe {
             let mut alloc = SbrkAllocator::new();
 
-            let p = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
+            let first_ptr = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
 
-            let p2 = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
+            let _second_ptr = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
 
-            alloc.free(p as *mut u8, size_of::<Thunk>());
+            alloc.free(first_ptr as *mut u8, size_of::<Thunk>());
 
-            let p3 = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
-            assert_eq!(p, p3);
+            let third_ptr = alloc.malloc(size_of::<Thunk>(), align_of::<Thunk>()) as *mut Thunk;
+            assert_eq!(first_ptr, third_ptr);
         }
     }
 }

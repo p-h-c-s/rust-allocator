@@ -25,7 +25,7 @@ impl<T> Spinlock<T> {
         while self
             .lock
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire)
-            .unwrap()
+            .unwrap_or(false)
         {
             spin_loop(); // Suggest yielding to the processor
         }
