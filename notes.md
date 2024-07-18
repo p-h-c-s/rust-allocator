@@ -33,3 +33,10 @@ https://stackoverflow.com/questions/55768549/in-malloc-why-use-brk-at-all-why-no
 
 
 Memory has to be contigous, so we don't free memory to the OS, we soft-free it in the eyes of the program. A linked list allows us to manage that
+
+// rust: https://os.phil-opp.com/heap-allocation/#the-allocator-interface
+
+![alt text](image.png)
+
+
+The alloc method takes a Layout instance as an argument, which describes the desired size and alignment that the allocated memory should have. It returns a raw pointer to the first byte of the allocated memory block. Instead of an explicit error value, the alloc method returns a null pointer to signal an allocation error. This is a bit non-idiomatic, but it has the advantage that wrapping existing system allocators is easy since they use the same convention.
